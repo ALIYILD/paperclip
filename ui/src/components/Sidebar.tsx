@@ -9,6 +9,13 @@ import {
   SquarePen,
   Network,
   Settings,
+  Users,
+  TicketCheck,
+  FileText,
+  TrendingUp,
+  Building2,
+  BarChart3,
+  Play,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { SidebarSection } from "./SidebarSection";
@@ -90,6 +97,16 @@ export function Sidebar() {
         <SidebarProjects />
 
         <SidebarAgents />
+
+        <SidebarSection label="CRM">
+          <SidebarNavItem to="/customers" label="Customers" icon={Users} />
+          <SidebarNavItem to="/tickets" label="Tickets" icon={TicketCheck} />
+          <SidebarNavItem to="/contracts" label="Contracts" icon={FileText} />
+          <SidebarNavItem to="/pipeline" label="Pipeline" icon={TrendingUp} />
+          <SidebarNavItem to="/operations" label="Operations" icon={Building2} />
+          <SidebarNavItem to="/reports" label="Reports" icon={BarChart3} />
+          <SidebarNavItem to="/playbooks" label="Playbooks" icon={Play} />
+        </SidebarSection>
 
         <SidebarSection label="Company">
           <SidebarNavItem to="/org" label="Org" icon={Network} />

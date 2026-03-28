@@ -30,6 +30,15 @@ import { AuthPage } from "./pages/Auth";
 import { BoardClaimPage } from "./pages/BoardClaim";
 import { InviteLandingPage } from "./pages/InviteLanding";
 import { NotFoundPage } from "./pages/NotFound";
+import { Customers } from "./pages/Customers";
+import { CustomerDetail } from "./pages/CustomerDetail";
+import { CrmTickets } from "./pages/CrmTickets";
+import { CrmTicketDetail } from "./pages/CrmTicketDetail";
+import { Contracts } from "./pages/Contracts";
+import { Pipeline } from "./pages/Pipeline";
+import { Operations } from "./pages/Operations";
+import { CrmReports } from "./pages/CrmReports";
+import { CrmPlaybooks } from "./pages/CrmPlaybooks";
 import { queryKeys } from "./lib/queryKeys";
 import { useCompany } from "./context/CompanyContext";
 import { useDialog } from "./context/DialogContext";
@@ -145,6 +154,15 @@ function boardRoutes() {
       <Route path="inbox/unread" element={<Inbox />} />
       <Route path="inbox/all" element={<Inbox />} />
       <Route path="inbox/new" element={<Navigate to="/inbox/recent" replace />} />
+      <Route path="customers" element={<Customers />} />
+      <Route path="customers/:customerId" element={<CustomerDetail />} />
+      <Route path="tickets" element={<CrmTickets />} />
+      <Route path="tickets/:ticketId" element={<CrmTicketDetail />} />
+      <Route path="contracts" element={<Contracts />} />
+      <Route path="pipeline" element={<Pipeline />} />
+      <Route path="operations" element={<Operations />} />
+      <Route path="reports" element={<CrmReports />} />
+      <Route path="playbooks" element={<CrmPlaybooks />} />
       <Route path="design-guide" element={<DesignGuide />} />
       <Route path="tests/ux/runs" element={<RunTranscriptUxLab />} />
       <Route path="*" element={<NotFoundPage scope="board" />} />
@@ -249,6 +267,15 @@ export function App() {
           <Route path="projects/:projectId/issues/:filter" element={<UnprefixedBoardRedirect />} />
           <Route path="projects/:projectId/configuration" element={<UnprefixedBoardRedirect />} />
           <Route path="tests/ux/runs" element={<UnprefixedBoardRedirect />} />
+          <Route path="customers" element={<UnprefixedBoardRedirect />} />
+          <Route path="customers/:customerId" element={<UnprefixedBoardRedirect />} />
+          <Route path="tickets" element={<UnprefixedBoardRedirect />} />
+          <Route path="tickets/:ticketId" element={<UnprefixedBoardRedirect />} />
+          <Route path="contracts" element={<UnprefixedBoardRedirect />} />
+          <Route path="pipeline" element={<UnprefixedBoardRedirect />} />
+          <Route path="operations" element={<UnprefixedBoardRedirect />} />
+          <Route path="reports" element={<UnprefixedBoardRedirect />} />
+          <Route path="playbooks" element={<UnprefixedBoardRedirect />} />
           <Route path=":companyPrefix" element={<Layout />}>
             {boardRoutes()}
           </Route>

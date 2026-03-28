@@ -17,6 +17,9 @@ export default defineConfig({
         target: "http://localhost:3100",
         ws: true,
       },
+      "/v1": {
+        target: "http://localhost:3200",
+      },
     },
   },
 });
