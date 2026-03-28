@@ -1,8 +1,11 @@
 /**
  * DeepSynaps CRM API client.
  * Hits /v1/internal/... endpoints (proxied to port 3200).
+ * Falls back to seed data when backend is unreachable.
  * Separate from the Paperclip /api client.
  */
+
+import * as seed from "./crm-seed";
 
 class CrmApiError extends Error {
   status: number;
@@ -20,16 +23,22 @@ async function crmRequest<T>(path: string, init?: RequestInit): Promise<T> {
   if (!headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  const res = await fetch(path, { headers, ...init });
-  if (!res.ok) {
-    const body = await res.json().catch(() => null);
-    throw new CrmApiError(
-      (body as { detail?: string } | null)?.detail ?? `CRM request failed: ${res.status}`,
-      res.status,
-      body,
-    );
+  try {
+    const res = await fetch(path, { headers, ...init });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      throw new CrmApiError(
+        (body as { detail?: string } | null)?.detail ?? `CRM request failed: ${res.status}`,
+        res.status,
+        body,
+      );
+    }
+    return res.json();
+  } catch (err) {
+    // If backend is unreachable, signal to use seed data
+    if (err instanceof CrmApiError) throw err;
+    throw new CrmApiError("CRM backend unreachable", 0, null);
   }
-  return res.json();
 }
 
 const crm = {
@@ -116,20 +125,32 @@ export interface OnboardingProgress {
 
 const C = "/v1/internal/customers";
 
+async function withFallback<T>(apiFn: () => Promise<T>, fallback: T): Promise<T> {
+  try { return await apiFn(); } catch { return fallback; }
+}
+
 export const customersApi = {
   list: (filters?: { status?: string; tier?: string; assigned_agent_id?: string }) =>
-    crm.get<Customer[]>(`${C}${qs(filters ?? {})}`),
-  get: (id: string) => crm.get<Customer>(`${C}/${id}`),
+    withFallback(() => crm.get<Customer[]>(`${C}${qs(filters ?? {})}`),
+      seed.seedCustomers.filter((c) => (!filters?.status || c.status === filters.status) && (!filters?.tier || c.tier === filters.tier))),
+  get: (id: string) =>
+    withFallback(() => crm.get<Customer>(`${C}/${id}`),
+      seed.seedCustomers.find((c) => c.customer_id === id) ?? seed.seedCustomers[0]),
   create: (data: Partial<Customer>) => crm.post<Customer>(C, data),
   update: (id: string, data: Partial<Customer>) => crm.patch<Customer>(`${C}/${id}`, data),
-  healthSummary: () => crm.get<HealthSummary>(`${C}/health-summary`),
-  atRisk: (threshold?: number) => crm.get<Customer[]>(`${C}/at-risk${qs({ threshold })}`),
-  getHealth: (id: string) => crm.get<HealthBreakdown>(`${C}/${id}/health`),
+  healthSummary: () =>
+    withFallback(() => crm.get<HealthSummary>(`${C}/health-summary`), seed.seedHealthSummary),
+  atRisk: (threshold?: number) =>
+    withFallback(() => crm.get<Customer[]>(`${C}/at-risk${qs({ threshold })}`),
+      seed.seedCustomers.filter((c) => c.health_score < (threshold ?? 40))),
+  getHealth: (id: string) =>
+    withFallback(() => crm.get<HealthBreakdown>(`${C}/${id}/health`), seed.seedHealthBreakdown(id)),
   listInteractions: (id: string, limit?: number) =>
-    crm.get<Interaction[]>(`${C}/${id}/interactions${qs({ limit })}`),
+    withFallback(() => crm.get<Interaction[]>(`${C}/${id}/interactions${qs({ limit })}`), seed.seedInteractions(id)),
   addInteraction: (id: string, data: Partial<Interaction>) =>
     crm.post<Interaction>(`${C}/${id}/interactions`, data),
-  getOnboarding: (id: string) => crm.get<OnboardingProgress>(`${C}/${id}/onboarding`),
+  getOnboarding: (id: string) =>
+    withFallback(() => crm.get<OnboardingProgress>(`${C}/${id}/onboarding`), seed.seedOnboarding(id)),
   updateOnboardingStep: (id: string, stepName: string, data: Record<string, unknown>) =>
     crm.patch<unknown>(`${C}/${id}/onboarding/${encodeURIComponent(stepName)}`, data),
 };
@@ -195,24 +216,25 @@ export interface TicketEvent {
 const T = "/v1/internal/tickets";
 
 export const ticketsApi = {
-  summary: () => crm.get<TicketSummary>(`${T}/summary`),
+  summary: () =>
+    withFallback(() => crm.get<TicketSummary>(`${T}/summary`), seed.seedTicketSummary),
   list: (filters?: {
-    status?: string;
-    severity?: string;
-    category?: string;
-    assigned_team?: string;
-    customer_id?: string;
-    search?: string;
-    limit?: number;
-    offset?: number;
-  }) => crm.get<Ticket[]>(`${T}${qs(filters ?? {})}`),
-  get: (id: string) => crm.get<Ticket>(`${T}/${id}`),
+    status?: string; severity?: string; category?: string;
+    assigned_team?: string; customer_id?: string; search?: string;
+    limit?: number; offset?: number;
+  }) => withFallback(() => crm.get<Ticket[]>(`${T}${qs(filters ?? {})}`),
+    seed.seedTickets.filter((t) => (!filters?.status || t.status === filters.status) && (!filters?.severity || t.severity === filters.severity))),
+  get: (id: string) =>
+    withFallback(() => crm.get<Ticket>(`${T}/${id}`),
+      seed.seedTickets.find((t) => t.ticket_id === id || t.ticket_number === id) ?? seed.seedTickets[0]),
   create: (data: Partial<Ticket>) => crm.post<Ticket>(T, data),
   update: (id: string, data: Record<string, unknown>) => crm.patch<Ticket>(`${T}/${id}`, data),
-  listComments: (id: string) => crm.get<TicketComment[]>(`${T}/${id}/comments`),
+  listComments: (id: string) =>
+    withFallback(() => crm.get<TicketComment[]>(`${T}/${id}/comments`), seed.seedTicketComments(id)),
   addComment: (id: string, data: Partial<TicketComment>) =>
     crm.post<TicketComment>(`${T}/${id}/comments`, data),
-  listEvents: (id: string) => crm.get<TicketEvent[]>(`${T}/${id}/events`),
+  listEvents: (id: string) =>
+    withFallback(() => crm.get<TicketEvent[]>(`${T}/${id}/events`), seed.seedTicketEvents(id)),
   checkEscalations: () => crm.post<unknown>(`${T}/check-escalations`),
 };
 
@@ -286,29 +308,30 @@ const CT = "/v1/internal/contracts";
 
 export const contractsApi = {
   list: (filters?: { customer_id?: string; status?: string }) =>
-    crm.get<Contract[]>(`${CT}${qs(filters ?? {})}`),
-  summary: () => crm.get<Record<string, unknown>>(`${CT}/summary`),
-  expiring: (days?: number) => crm.get<Contract[]>(`${CT}/expiring${qs({ days })}`),
-  get: (id: string) => crm.get<Contract>(`${CT}/${id}`),
+    withFallback(() => crm.get<Contract[]>(`${CT}${qs(filters ?? {})}`), seed.seedContracts),
+  summary: () =>
+    withFallback(() => crm.get<Record<string, unknown>>(`${CT}/summary`), seed.seedContractSummary),
+  expiring: (days?: number) =>
+    withFallback(() => crm.get<Contract[]>(`${CT}/expiring${qs({ days })}`), seed.seedContracts.filter((c) => c.status === "expiring")),
+  get: (id: string) => withFallback(() => crm.get<Contract>(`${CT}/${id}`), seed.seedContracts[0]),
   create: (data: Partial<Contract>) => crm.post<Contract>(CT, data),
   update: (id: string, data: Partial<Contract>) => crm.patch<Contract>(`${CT}/${id}`, data),
   listInvoices: (filters?: { customer_id?: string; status?: string }) =>
-    crm.get<Invoice[]>(`${CT}/invoices${qs(filters ?? {})}`),
-  overdueInvoices: () => crm.get<Invoice[]>(`${CT}/invoices/overdue`),
+    withFallback(() => crm.get<Invoice[]>(`${CT}/invoices${qs(filters ?? {})}`), seed.seedInvoices),
+  overdueInvoices: () =>
+    withFallback(() => crm.get<Invoice[]>(`${CT}/invoices/overdue`), seed.seedInvoices.filter((i) => i.status === "overdue")),
   createInvoice: (data: Partial<Invoice>) => crm.post<Invoice>(`${CT}/invoices`, data),
-  updateInvoice: (id: string, data: Partial<Invoice>) =>
-    crm.patch<Invoice>(`${CT}/invoices/${id}`, data),
+  updateInvoice: (id: string, data: Partial<Invoice>) => crm.patch<Invoice>(`${CT}/invoices/${id}`, data),
   markPaid: (id: string) => crm.post<Invoice>(`${CT}/invoices/${id}/mark-paid`),
   listQuotes: (filters?: { customer_id?: string; status?: string }) =>
-    crm.get<Quote[]>(`${CT}/quotes${qs(filters ?? {})}`),
+    withFallback(() => crm.get<Quote[]>(`${CT}/quotes${qs(filters ?? {})}`), seed.seedQuotes),
   createQuote: (data: Partial<Quote>) => crm.post<Quote>(`${CT}/quotes`, data),
   acceptQuote: (id: string) => crm.post<Quote>(`${CT}/quotes/${id}/accept`),
   rejectQuote: (id: string) => crm.post<Quote>(`${CT}/quotes/${id}/reject`),
   listRenewals: (filters?: { status?: string; customer_id?: string }) =>
-    crm.get<Renewal[]>(`${CT}/renewals${qs(filters ?? {})}`),
+    withFallback(() => crm.get<Renewal[]>(`${CT}/renewals${qs(filters ?? {})}`), seed.seedRenewals),
   createRenewal: (data: Partial<Renewal>) => crm.post<Renewal>(`${CT}/renewals`, data),
-  updateRenewal: (id: string, data: Partial<Renewal>) =>
-    crm.patch<Renewal>(`${CT}/renewals/${id}`, data),
+  updateRenewal: (id: string, data: Partial<Renewal>) => crm.patch<Renewal>(`${CT}/renewals/${id}`, data),
 };
 
 // ── Marketing ────────────────────────────────────────
@@ -349,19 +372,21 @@ const M = "/v1/internal/marketing";
 
 export const marketingApi = {
   listLeads: (filters?: { status?: string; source?: string; assigned_agent_id?: string }) =>
-    crm.get<Lead[]>(`${M}/leads${qs(filters ?? {})}`),
-  pipeline: () => crm.get<Record<string, unknown>>(`${M}/leads/pipeline`),
-  getLead: (id: string) => crm.get<Lead>(`${M}/leads/${id}`),
+    withFallback(() => crm.get<Lead[]>(`${M}/leads${qs(filters ?? {})}`),
+      seed.seedLeads.filter((l) => (!filters?.status || l.status === filters.status) && (!filters?.source || l.source === filters.source))),
+  pipeline: () =>
+    withFallback(() => crm.get<Record<string, unknown>>(`${M}/leads/pipeline`), seed.seedPipeline),
+  getLead: (id: string) => withFallback(() => crm.get<Lead>(`${M}/leads/${id}`), seed.seedLeads[0]),
   createLead: (data: Partial<Lead>) => crm.post<Lead>(`${M}/leads`, data),
   updateLead: (id: string, data: Partial<Lead>) => crm.patch<Lead>(`${M}/leads/${id}`, data),
   convertLead: (id: string) => crm.post<Lead>(`${M}/leads/${id}/convert`),
   listCampaigns: (filters?: { status?: string }) =>
-    crm.get<Campaign[]>(`${M}/campaigns${qs(filters ?? {})}`),
-  campaignPerformance: () => crm.get<Record<string, unknown>>(`${M}/campaigns/performance`),
-  getCampaign: (id: string) => crm.get<Campaign>(`${M}/campaigns/${id}`),
+    withFallback(() => crm.get<Campaign[]>(`${M}/campaigns${qs(filters ?? {})}`), seed.seedCampaigns),
+  campaignPerformance: () =>
+    withFallback(() => crm.get<Record<string, unknown>>(`${M}/campaigns/performance`), {}),
+  getCampaign: (id: string) => withFallback(() => crm.get<Campaign>(`${M}/campaigns/${id}`), seed.seedCampaigns[0]),
   createCampaign: (data: Partial<Campaign>) => crm.post<Campaign>(`${M}/campaigns`, data),
-  updateCampaign: (id: string, data: Partial<Campaign>) =>
-    crm.patch<Campaign>(`${M}/campaigns/${id}`, data),
+  updateCampaign: (id: string, data: Partial<Campaign>) => crm.patch<Campaign>(`${M}/campaigns/${id}`, data),
 };
 
 // ── Success ──────────────────────────────────────────
@@ -369,20 +394,20 @@ export const marketingApi = {
 const S = "/v1/internal/success";
 
 export const successApi = {
-  atRisk: () => crm.get<unknown[]>(`${S}/at-risk`),
-  expansion: () => crm.get<unknown[]>(`${S}/expansion`),
-  customer360: (customerId: string) => crm.get<Record<string, unknown>>(`${S}/${customerId}/360`),
+  atRisk: () => withFallback(() => crm.get<unknown[]>(`${S}/at-risk`), []),
+  expansion: () => withFallback(() => crm.get<unknown[]>(`${S}/expansion`), []),
+  customer360: (customerId: string) => withFallback(() => crm.get<Record<string, unknown>>(`${S}/${customerId}/360`), {}),
   timeline: (customerId: string, limit?: number) =>
-    crm.get<unknown[]>(`${S}/${customerId}/timeline${qs({ limit })}`),
+    withFallback(() => crm.get<unknown[]>(`${S}/${customerId}/timeline${qs({ limit })}`), []),
   addTimelineEvent: (customerId: string, data: Record<string, unknown>) =>
     crm.post<unknown>(`${S}/${customerId}/timeline`, data),
-  stakeholders: (customerId: string) => crm.get<unknown[]>(`${S}/${customerId}/stakeholders`),
+  stakeholders: (customerId: string) => withFallback(() => crm.get<unknown[]>(`${S}/${customerId}/stakeholders`), []),
   addStakeholder: (customerId: string, data: Record<string, unknown>) =>
     crm.post<unknown>(`${S}/${customerId}/stakeholders`, data),
-  plans: (customerId: string) => crm.get<unknown[]>(`${S}/${customerId}/plans`),
-  qbrs: (customerId: string) => crm.get<unknown[]>(`${S}/${customerId}/qbrs`),
-  adoption: (customerId: string) => crm.get<unknown[]>(`${S}/${customerId}/adoption`),
-  scores: (customerId: string) => crm.get<Record<string, unknown>>(`${S}/${customerId}/scores`),
+  plans: (customerId: string) => withFallback(() => crm.get<unknown[]>(`${S}/${customerId}/plans`), []),
+  qbrs: (customerId: string) => withFallback(() => crm.get<unknown[]>(`${S}/${customerId}/qbrs`), []),
+  adoption: (customerId: string) => withFallback(() => crm.get<unknown[]>(`${S}/${customerId}/adoption`), []),
+  scores: (customerId: string) => withFallback(() => crm.get<Record<string, unknown>>(`${S}/${customerId}/scores`), {}),
   calculateScores: (customerId: string) =>
     crm.post<Record<string, unknown>>(`${S}/${customerId}/scores/calculate`),
 };
@@ -459,22 +484,27 @@ export interface HiringRecord {
 const O = "/v1/internal/operations";
 
 export const operationsApi = {
-  dashboard: () => crm.get<Record<string, unknown>>(`${O}/dashboard`),
-  listKpis: (category?: string) => crm.get<KPI[]>(`${O}/kpis${qs({ category })}`),
+  dashboard: () => withFallback(() => crm.get<Record<string, unknown>>(`${O}/dashboard`), {}),
+  listKpis: (category?: string) =>
+    withFallback(() => crm.get<KPI[]>(`${O}/kpis${qs({ category })}`),
+      seed.seedKpis.filter((k) => !category || k.category === category)),
   createKpi: (data: Partial<KPI>) => crm.post<KPI>(`${O}/kpis`, data),
   updateKpi: (id: string, data: Partial<KPI>) => crm.patch<KPI>(`${O}/kpis/${id}`, data),
   listOkrs: (quarter?: string, level?: string) =>
-    crm.get<OKR[]>(`${O}/okrs${qs({ quarter, level })}`),
+    withFallback(() => crm.get<OKR[]>(`${O}/okrs${qs({ quarter, level })}`), seed.seedOkrs),
   createOkr: (data: Partial<OKR>) => crm.post<OKR>(`${O}/okrs`, data),
   updateOkr: (id: string, data: Partial<OKR>) => crm.patch<OKR>(`${O}/okrs/${id}`, data),
-  latestFinancials: () => crm.get<FinancialSnapshot>(`${O}/financials`),
+  latestFinancials: () =>
+    withFallback(() => crm.get<FinancialSnapshot>(`${O}/financials`), seed.seedFinancials),
   financialTrend: (months?: number) =>
-    crm.get<FinancialSnapshot[]>(`${O}/financials/trend${qs({ months })}`),
-  listInvestors: (stage?: string) => crm.get<InvestorRecord[]>(`${O}/investors${qs({ stage })}`),
+    withFallback(() => crm.get<FinancialSnapshot[]>(`${O}/financials/trend${qs({ months })}`), [seed.seedFinancials]),
+  listInvestors: (stage?: string) =>
+    withFallback(() => crm.get<InvestorRecord[]>(`${O}/investors${qs({ stage })}`), seed.seedInvestors),
   addInvestor: (data: Partial<InvestorRecord>) => crm.post<InvestorRecord>(`${O}/investors`, data),
   updateInvestor: (id: string, data: Partial<InvestorRecord>) =>
     crm.patch<InvestorRecord>(`${O}/investors/${id}`, data),
-  listRoles: (status?: string) => crm.get<HiringRecord[]>(`${O}/hiring${qs({ status })}`),
+  listRoles: (status?: string) =>
+    withFallback(() => crm.get<HiringRecord[]>(`${O}/hiring${qs({ status })}`), seed.seedHiring),
   addRole: (data: Partial<HiringRecord>) => crm.post<HiringRecord>(`${O}/hiring`, data),
   updateRole: (id: string, data: Partial<HiringRecord>) =>
     crm.patch<HiringRecord>(`${O}/hiring/${id}`, data),
@@ -513,14 +543,16 @@ const R = "/v1/internal/reports";
 
 export const reportsApi = {
   list: (filters?: { report_type?: string; status?: string; customer_id?: string; limit?: number }) =>
-    crm.get<Report[]>(`${R}${qs(filters ?? {})}`),
-  stats: () => crm.get<Record<string, unknown>>(`${R}/stats`),
-  get: (id: string) => crm.get<Report>(`${R}/${id}`),
+    withFallback(() => crm.get<Report[]>(`${R}${qs(filters ?? {})}`),
+      seed.seedReports.filter((r) => !filters?.report_type || r.report_type === filters.report_type)),
+  stats: () => withFallback(() => crm.get<Record<string, unknown>>(`${R}/stats`), seed.seedReportStats),
+  get: (id: string) => withFallback(() => crm.get<Report>(`${R}/${id}`), seed.seedReports[0]),
   generate: (data: { report_type: string; customer_id?: string; title?: string }) =>
     crm.post<Report>(`${R}/generate`, data),
   generateAll: () => crm.post<Report[]>(`${R}/generate/all`),
   archive: (id: string) => crm.delete<Report>(`${R}/${id}`),
-  listSchedules: () => crm.get<ReportSchedule[]>(`${R}/schedules`),
+  listSchedules: () =>
+    withFallback(() => crm.get<ReportSchedule[]>(`${R}/schedules`), seed.seedSchedules),
   createSchedule: (data: Partial<ReportSchedule>) =>
     crm.post<ReportSchedule>(`${R}/schedules`, data),
   runDueSchedules: () => crm.post<unknown>(`${R}/schedules/run-due`),
@@ -562,15 +594,17 @@ const P = "/v1/internal/playbooks";
 
 export const playbooksApi = {
   list: (filters?: { playbook_type?: string; status?: string }) =>
-    crm.get<Playbook[]>(`${P}${qs(filters ?? {})}`),
-  stats: () => crm.get<Record<string, unknown>>(`${P}/stats`),
-  get: (id: string) => crm.get<Playbook>(`${P}/${id}`),
+    withFallback(() => crm.get<Playbook[]>(`${P}${qs(filters ?? {})}`),
+      seed.seedPlaybooks.filter((p) => (!filters?.playbook_type || p.playbook_type === filters.playbook_type) && (!filters?.status || p.status === filters.status))),
+  stats: () => withFallback(() => crm.get<Record<string, unknown>>(`${P}/stats`), seed.seedPlaybookStats),
+  get: (id: string) => withFallback(() => crm.get<Playbook>(`${P}/${id}`), seed.seedPlaybooks[0]),
   create: (data: Partial<Playbook>) => crm.post<Playbook>(P, data),
   update: (id: string, data: Partial<Playbook>) => crm.patch<Playbook>(`${P}/${id}`, data),
   listRuns: (filters?: { playbook_id?: string; customer_id?: string; status?: string; limit?: number }) =>
-    crm.get<PlaybookRun[]>(`${P}/runs${qs(filters ?? {})}`),
-  activeRuns: () => crm.get<PlaybookRun[]>(`${P}/runs/active`),
-  getRun: (id: string) => crm.get<PlaybookRun>(`${P}/runs/${id}`),
+    withFallback(() => crm.get<PlaybookRun[]>(`${P}/runs${qs(filters ?? {})}`), seed.seedPlaybookRuns),
+  activeRuns: () =>
+    withFallback(() => crm.get<PlaybookRun[]>(`${P}/runs/active`), seed.seedActiveRuns),
+  getRun: (id: string) => withFallback(() => crm.get<PlaybookRun>(`${P}/runs/${id}`), seed.seedPlaybookRuns[0]),
   startRun: (playbookId: string, data?: Record<string, unknown>) =>
     crm.post<PlaybookRun>(`${P}/${playbookId}/start`, data),
   cancelRun: (runId: string) => crm.post<PlaybookRun>(`${P}/runs/${runId}/cancel`),
