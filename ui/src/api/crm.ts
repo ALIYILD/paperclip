@@ -18,13 +18,17 @@ class CrmApiError extends Error {
   }
 }
 
+const CRM_BASE = typeof window !== "undefined" && window.location.hostname === "localhost"
+  ? ""  // dev: Vite proxy handles /v1 → localhost:3200
+  : "https://deepsynaps-api.fly.dev";  // prod: hit Fly.io directly
+
 async function crmRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers ?? undefined);
   if (!headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
   try {
-    const res = await fetch(path, { headers, ...init });
+    const res = await fetch(`${CRM_BASE}${path}`, { headers, ...init });
     if (!res.ok) {
       const body = await res.json().catch(() => null);
       throw new CrmApiError(
