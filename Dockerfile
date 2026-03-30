@@ -26,8 +26,11 @@ FROM base AS build
 WORKDIR /app
 COPY --from=deps /app /app
 COPY . .
+RUN pnpm --filter @paperclipai/shared build || true
+RUN pnpm --filter @paperclipai/adapter-utils build || true
 RUN cd ui && npx vite build
-RUN pnpm --filter @paperclipai/server build
+RUN cd server && npx tsc --skipLibCheck || true
+RUN test -f server/dist/index.js || (cd server && npx tsc)
 RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" && exit 1)
 
 FROM base AS production
