@@ -66,12 +66,12 @@ export function CrmTicketDetail() {
   useEffect(() => {
     if (ticket) {
       setBreadcrumbs([
-        { label: "Tickets", to: "/tickets" },
+        { label: "Tickets", href: "/tickets" },
         { label: ticket.ticket_number || ticket.ticket_id },
       ]);
     } else {
       setBreadcrumbs([
-        { label: "Tickets", to: "/tickets" },
+        { label: "Tickets", href: "/tickets" },
         { label: ticketId ?? "" },
       ]);
     }

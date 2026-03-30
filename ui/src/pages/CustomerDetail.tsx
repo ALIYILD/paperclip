@@ -69,12 +69,12 @@ export function CustomerDetail() {
   useEffect(() => {
     if (customer) {
       setBreadcrumbs([
-        { label: "Customers", to: "/customers" },
+        { label: "Customers", href: "/customers" },
         { label: customer.company_name },
       ]);
     } else {
       setBreadcrumbs([
-        { label: "Customers", to: "/customers" },
+        { label: "Customers", href: "/customers" },
         { label: "..." },
       ]);
     }
@@ -312,9 +312,9 @@ export function CustomerDetail() {
                               {String(s.role ?? s.title ?? "")}
                             </p>
                           </div>
-                          {s.influence && (
+                          {s.influence ? (
                             <span className="text-xs text-muted-foreground">{String(s.influence)}</span>
-                          )}
+                          ) : null}
                         </div>
                       ),
                     )

@@ -1,0 +1,26 @@
+app = 'paperclip-board'
+primary_region = 'lhr'
+
+[build]
+
+[env]
+  PAPERCLIP_DEPLOYMENT_MODE = 'authenticated'
+  PAPERCLIP_DEPLOYMENT_EXPOSURE = 'public'
+  SERVE_UI = 'true'
+  PORT = '3100'
+
+[http_service]
+  internal_port = 3100
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ['app']
+
+[mounts]
+  source = 'paperclip_data'
+  destination = '/paperclip'
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '512mb'
