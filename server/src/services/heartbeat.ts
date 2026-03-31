@@ -12,6 +12,7 @@ import {
   issues,
   projects,
   projectWorkspaces,
+  approvals,
 } from "@paperclipai/db";
 import { conflict, notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
@@ -22,6 +23,7 @@ import type { AdapterExecutionResult, AdapterInvocationMeta, AdapterSessionCodec
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber, appendWithCap, MAX_EXCERPT_BYTES } from "../adapters/utils.js";
 import { costService } from "./costs.js";
+import { approvalService } from "./approvals.js";
 import { secretService } from "./secrets.js";
 import { resolveDefaultAgentWorkspaceDir } from "../home-paths.js";
 import { summarizeHeartbeatRunResultJson } from "./heartbeat-run-summary.js";
@@ -1210,6 +1212,114 @@ export function heartbeatService(db: Db) {
       await finalizeAgentStatus(run.agentId, "failed");
       await startNextQueuedRunForAgent(run.agentId);
       return;
+    }
+
+    // Approval gate: check if adapter_config has approvalRequired conditions
+    const approvalConfig = parseObject(agent.adapterConfig);
+    const approvalConditions = Array.isArray(approvalConfig.approvalRequired)
+      ? (approvalConfig.approvalRequired as Array<{ match?: string; threshold?: number }>)
+      : [];
+    if (approvalConditions.length > 0) {
+      const runContext = parseObject(run.contextSnapshot);
+      const runReason = typeof runContext.reason === "string" ? runContext.reason : "";
+      const runSource = typeof runContext.source === "string" ? runContext.source : "";
+      const contextText = `${runReason} ${runSource}`.toLowerCase();
+
+      const needsApproval = approvalConditions.some((cond) => {
+        if (typeof cond.match === "string" && contextText.includes(cond.match.toLowerCase())) {
+          return true;
+        }
+        if (typeof cond.threshold === "number") {
+          const budget = typeof runContext.budgetCents === "number" ? runContext.budgetCents : 0;
+          if (budget > cond.threshold) return true;
+        }
+        return false;
+      });
+
+      if (needsApproval) {
+        // Check for an existing approved approval for this run
+        const existingApprovals = await db
+          .select()
+          .from(approvals)
+          .where(
+            and(
+              eq(approvals.companyId, agent.companyId),
+              eq(approvals.requestedByAgentId, agent.id),
+              eq(approvals.type, "approve_ceo_strategy"),
+            ),
+          );
+        const runApproval = existingApprovals.find(
+          (a) =>
+            a.payload &&
+            (a.payload as Record<string, unknown>).heartbeatRunId === runId,
+        );
+
+        if (runApproval?.status === "approved") {
+          // Approval granted — continue execution
+        } else if (runApproval && runApproval.status !== "rejected") {
+          // Approval pending — park the run, it will resume on next heartbeat after approval
+          await setRunStatus(runId, "queued", {
+            resultJson: {
+              ...(run.resultJson ?? {}),
+              _approvalGate: {
+                approvalId: runApproval.id,
+                status: runApproval.status,
+                parkedAt: new Date().toISOString(),
+              },
+            },
+          });
+          logger.info(
+            { runId, approvalId: runApproval.id },
+            "run parked pending approval",
+          );
+          return;
+        } else if (!runApproval || runApproval.status === "rejected") {
+          // Create a new approval request
+          const approvalsSvc = approvalService(db);
+          const created = await approvalsSvc.create(agent.companyId, {
+            type: "approve_ceo_strategy",
+            requestedByAgentId: agent.id,
+            requestedByUserId: null,
+            status: "pending",
+            payload: {
+              heartbeatRunId: runId,
+              agentId: agent.id,
+              reason: runReason || "Run requires approval",
+              context: runContext,
+            },
+            decisionNote: null,
+            decidedByUserId: null,
+            decidedAt: null,
+            updatedAt: new Date(),
+          });
+          await setRunStatus(runId, "queued", {
+            resultJson: {
+              ...(run.resultJson ?? {}),
+              _approvalGate: {
+                approvalId: created.id,
+                status: "pending",
+                parkedAt: new Date().toISOString(),
+              },
+            },
+          });
+          publishLiveEvent({
+            companyId: agent.companyId,
+            type: "activity.logged",
+            payload: {
+              entity: "heartbeat_run",
+              entityId: runId,
+              action: "run.approval_required",
+              agentId: agent.id,
+              approvalId: created.id,
+            },
+          });
+          logger.info(
+            { runId, approvalId: created.id },
+            "run parked — approval created",
+          );
+          return;
+        }
+      }
     }
 
     const runtime = await ensureRuntimeState(agent);

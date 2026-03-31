@@ -25,6 +25,7 @@ import { llmRoutes } from "./routes/llms.js";
 import { assetRoutes } from "./routes/assets.js";
 import { accessRoutes } from "./routes/access.js";
 import { observabilityRoutes } from "./routes/observability.js";
+import { coordinationRoutes } from "./routes/coordination.js";
 import { applyUiBranding } from "./ui-branding.js";
 import type { BetterAuthSessionResult } from "./auth/better-auth.js";
 
@@ -124,6 +125,7 @@ export async function createApp(
     }),
   );
   api.use(observabilityRoutes(db));
+  api.use(coordinationRoutes(db));
   app.use("/api", api);
   app.use("/api", (_req, res) => {
     res.status(404).json({ error: "API route not found" });
