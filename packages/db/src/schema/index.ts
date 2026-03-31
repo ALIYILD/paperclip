@@ -32,3 +32,8 @@ export { approvalComments } from "./approval_comments.js";
 export { activityLog } from "./activity_log.js";
 export { companySecrets } from "./company_secrets.js";
 export { companySecretVersions } from "./company_secret_versions.js";
+export { agentRuns } from "./agent_runs.js";
+export { runSteps } from "./run_steps.js";
+export { executionEvents } from "./execution_events.js";
+export { auditEntries } from "./audit_entries.js";
+export { handoffRecords } from "./handoff_records.js";
