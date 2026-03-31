@@ -991,7 +991,67 @@ export function heartbeatService(db: Db) {
     if (reaped.length > 0) {
       logger.warn({ reapedCount: reaped.length, runIds: reaped }, "reaped orphaned heartbeat runs");
     }
-    return { reaped: reaped.length, runIds: reaped };
+
+    // Timeout watchdog: kill runs that have been running longer than their configured timeout
+    const timedOut: string[] = [];
+    const stillRunning = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.status, "running"));
+
+    for (const run of stillRunning) {
+      if (!run.startedAt) continue;
+      const agent = await getAgent(run.agentId);
+      if (!agent) continue;
+      const runtimeCfg = parseObject(agent.runtimeConfig);
+      const heartbeatCfg = parseObject(runtimeCfg.heartbeat);
+      const timeoutSec = asNumber(heartbeatCfg.timeoutSec, 0);
+      if (timeoutSec <= 0) continue;
+
+      const elapsedMs = now.getTime() - new Date(run.startedAt).getTime();
+      if (elapsedMs < timeoutSec * 1000) continue;
+
+      logger.warn(
+        { runId: run.id, agentId: run.agentId, elapsedMs, timeoutSec },
+        "run timed out – terminating",
+      );
+
+      // Kill the process if it's still tracked
+      const proc = runningProcesses.get(run.id);
+      if (proc?.child && typeof proc.child.kill === "function") {
+        try { proc.child.kill("SIGTERM"); } catch { /* best-effort */ }
+      }
+      runningProcesses.delete(run.id);
+
+      await setRunStatus(run.id, "failed", {
+        error: `Run timed out after ${timeoutSec}s`,
+        errorCode: "timeout",
+        finishedAt: now,
+      });
+      await setWakeupStatus(run.wakeupRequestId, "failed", {
+        finishedAt: now,
+        error: `Run timed out after ${timeoutSec}s`,
+      });
+      const timedOutRun = await getRun(run.id);
+      if (timedOutRun) {
+        await appendRunEvent(timedOutRun, 1, {
+          eventType: "lifecycle",
+          stream: "system",
+          level: "error",
+          message: `Run timed out after ${timeoutSec}s (elapsed ${Math.round(elapsedMs / 1000)}s)`,
+        });
+        await releaseIssueExecutionAndPromote(timedOutRun);
+      }
+      await finalizeAgentStatus(run.agentId, "failed");
+      await startNextQueuedRunForAgent(run.agentId);
+      timedOut.push(run.id);
+    }
+
+    if (timedOut.length > 0) {
+      logger.warn({ timedOutCount: timedOut.length, runIds: timedOut }, "timed out heartbeat runs");
+    }
+
+    return { reaped: reaped.length, runIds: reaped, timedOut: timedOut.length, timedOutIds: timedOut };
   }
 
   async function updateRuntimeState(
@@ -1098,6 +1158,39 @@ export function heartbeatService(db: Db) {
       });
       const failedRun = await getRun(runId);
       if (failedRun) await releaseIssueExecutionAndPromote(failedRun);
+      return;
+    }
+
+    // Budget gate: prevent execution when monthly budget is exceeded
+    if (
+      agent.budgetMonthlyCents > 0 &&
+      agent.spentMonthlyCents >= agent.budgetMonthlyCents
+    ) {
+      logger.warn(
+        { agentId: agent.id, runId, spent: agent.spentMonthlyCents, budget: agent.budgetMonthlyCents },
+        "budget exceeded – skipping run",
+      );
+      await setRunStatus(runId, "failed", {
+        error: "Monthly budget exceeded",
+        errorCode: "budget_exceeded",
+        finishedAt: new Date(),
+      });
+      await setWakeupStatus(run.wakeupRequestId, "failed", {
+        finishedAt: new Date(),
+        error: "Monthly budget exceeded",
+      });
+      const failedRun = await getRun(runId);
+      if (failedRun) {
+        await appendRunEvent(failedRun, 1, {
+          eventType: "lifecycle",
+          stream: "system",
+          level: "warn",
+          message: `Budget exceeded: spent ${agent.spentMonthlyCents}c of ${agent.budgetMonthlyCents}c monthly limit`,
+        });
+        await releaseIssueExecutionAndPromote(failedRun);
+      }
+      await finalizeAgentStatus(run.agentId, "failed");
+      await startNextQueuedRunForAgent(run.agentId);
       return;
     }
 

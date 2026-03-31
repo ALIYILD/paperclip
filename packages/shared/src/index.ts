@@ -124,6 +124,8 @@ export type {
   CompanyPortabilityImportRequest,
   CompanyPortabilityImportResult,
   CompanyPortabilityExportRequest,
+  ExecutionPolicy,
+  RetryPolicy,
   EnvBinding,
   AgentEnvConfig,
   CompanySecret,
