@@ -105,6 +105,20 @@ async function withAgentStartLock<T>(agentId: string, fn: () => Promise<T>) {
   }
 }
 
+type WakeupPriority = "critical" | "high" | "normal" | "low";
+
+const PRIORITY_SORT_VALUE: Record<WakeupPriority, number> = {
+  critical: 0,
+  high: 1,
+  normal: 2,
+  low: 3,
+};
+
+function parsePriority(value: unknown): WakeupPriority {
+  if (typeof value === "string" && value in PRIORITY_SORT_VALUE) return value as WakeupPriority;
+  return "normal";
+}
+
 interface WakeupOptions {
   source?: "timer" | "assignment" | "on_demand" | "automation";
   triggerDetail?: "manual" | "ping" | "callback" | "system";
@@ -114,6 +128,7 @@ interface WakeupOptions {
   requestedByActorType?: "user" | "agent" | "system";
   requestedByActorId?: string | null;
   contextSnapshot?: Record<string, unknown>;
+  priority?: WakeupPriority;
 }
 
 interface ParsedIssueAssigneeAdapterOverrides {
@@ -1111,7 +1126,10 @@ export function heartbeatService(db: Db) {
         .select()
         .from(heartbeatRuns)
         .where(and(eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, "queued")))
-        .orderBy(asc(heartbeatRuns.createdAt))
+        .orderBy(
+          asc(sql`COALESCE((${heartbeatRuns.contextSnapshot}->>'_prioritySort')::int, ${PRIORITY_SORT_VALUE.normal})`),
+          asc(heartbeatRuns.createdAt),
+        )
         .limit(availableSlots);
       if (queuedRuns.length === 0) return [];
 
@@ -1714,54 +1732,119 @@ export function heartbeatService(db: Db) {
         }
       }
 
-      const failedRun = await setRunStatus(run.id, "failed", {
-        error: message,
-        errorCode: "adapter_failed",
-        finishedAt: new Date(),
-        stdoutExcerpt,
-        stderrExcerpt,
-        logBytes: logSummary?.bytes,
-        logSha256: logSummary?.sha256,
-        logCompressed: logSummary?.compressed ?? false,
-      });
-      await setWakeupStatus(run.wakeupRequestId, "failed", {
-        finishedAt: new Date(),
-        error: message,
-      });
+      // --- Retry logic: check if this run should be retried ---
+      const prevResultJson = parseObject(run.resultJson);
+      const retryCount = asNumber(prevResultJson._retryCount, 0);
+      const adapterCfg = parseObject(agent.adapterConfig);
+      const retryPolicy = parseObject(adapterCfg.retryPolicy);
+      const maxRetries = asNumber(retryPolicy.maxRetries, 2);
+      const backoffMs = asNumber(retryPolicy.backoffMs, 30000);
 
-      if (failedRun) {
-        await appendRunEvent(failedRun, seq++, {
-          eventType: "error",
+      if (retryCount < maxRetries) {
+        const nextRetry = retryCount + 1;
+        const scheduledFor = new Date(Date.now() + backoffMs * nextRetry);
+        logger.info(
+          { runId, agentId: agent.id, retryCount: nextRetry, maxRetries, scheduledFor },
+          "retrying failed run",
+        );
+        await setRunStatus(run.id, "queued", {
+          error: null,
+          errorCode: null,
+          finishedAt: null,
+          startedAt: null,
+          stdoutExcerpt,
+          stderrExcerpt,
+          logBytes: logSummary?.bytes,
+          logSha256: logSummary?.sha256,
+          logCompressed: logSummary?.compressed ?? false,
+          resultJson: {
+            ...prevResultJson,
+            _retryCount: nextRetry,
+            _lastRetryError: message,
+            _retryScheduledFor: scheduledFor.toISOString(),
+          },
+        });
+        await appendRunEvent(run, seq++, {
+          eventType: "lifecycle",
           stream: "system",
-          level: "error",
-          message,
+          level: "warn",
+          message: `Retry ${nextRetry}/${maxRetries} scheduled for ${scheduledFor.toISOString()} (error: ${message})`,
         });
-        await releaseIssueExecutionAndPromote(failedRun);
-
-        await updateRuntimeState(agent, failedRun, {
-          exitCode: null,
-          signal: null,
-          timedOut: false,
-          errorMessage: message,
-        }, {
-          legacySessionId: runtimeForAdapter.sessionId,
+        publishLiveEvent({
+          companyId: run.companyId,
+          type: "heartbeat.run.status",
+          payload: {
+            runId: run.id,
+            agentId: run.agentId,
+            status: "queued",
+            retryCount: nextRetry,
+            retryScheduledFor: scheduledFor.toISOString(),
+          },
         });
-
-        if (taskKey && (previousSessionParams || previousSessionDisplayId || taskSession)) {
-          await upsertTaskSession({
-            companyId: agent.companyId,
-            agentId: agent.id,
-            adapterType: agent.adapterType,
-            taskKey,
-            sessionParamsJson: previousSessionParams,
-            sessionDisplayId: previousSessionDisplayId,
-            lastRunId: failedRun.id,
-            lastError: message,
+        // Schedule the retry after backoff
+        setTimeout(() => {
+          void startNextQueuedRunForAgent(agent.id).catch((retryErr) => {
+            logger.error({ err: retryErr, runId }, "failed to start retry run");
           });
-        }
-      }
+        }, backoffMs * nextRetry);
+        await finalizeAgentStatus(agent.id, "failed");
+      } else {
+        // Max retries exhausted – permanently fail
+        const failedRun = await setRunStatus(run.id, "failed", {
+          error: message,
+          errorCode: "adapter_failed",
+          finishedAt: new Date(),
+          stdoutExcerpt,
+          stderrExcerpt,
+          logBytes: logSummary?.bytes,
+          logSha256: logSummary?.sha256,
+          logCompressed: logSummary?.compressed ?? false,
+          resultJson: {
+            ...prevResultJson,
+            _retryCount: retryCount,
+            _permanentlyFailed: true,
+            _lastRetryError: message,
+          },
+        });
+        await setWakeupStatus(run.wakeupRequestId, "failed", {
+          finishedAt: new Date(),
+          error: retryCount > 0 ? `Permanently failed after ${retryCount} retries: ${message}` : message,
+        });
 
-      await finalizeAgentStatus(agent.id, "failed");
+        if (failedRun) {
+          await appendRunEvent(failedRun, seq++, {
+            eventType: "error",
+            stream: "system",
+            level: "error",
+            message: retryCount > 0 ? `Permanently failed after ${retryCount} retries: ${message}` : message,
+          });
+          await releaseIssueExecutionAndPromote(failedRun);
+
+          await updateRuntimeState(agent, failedRun, {
+            exitCode: null,
+            signal: null,
+            timedOut: false,
+            errorMessage: message,
+          }, {
+            legacySessionId: runtimeForAdapter.sessionId,
+          });
+
+          if (taskKey && (previousSessionParams || previousSessionDisplayId || taskSession)) {
+            await upsertTaskSession({
+              companyId: agent.companyId,
+              agentId: agent.id,
+              adapterType: agent.adapterType,
+              taskKey,
+              sessionParamsJson: previousSessionParams,
+              sessionDisplayId: previousSessionDisplayId,
+              lastRunId: failedRun.id,
+              lastError: message,
+            });
+          }
+        }
+
+        await finalizeAgentStatus(agent.id, "failed");
+      }
     } finally {
       await releaseRuntimeServicesForRun(run.id);
       await startNextQueuedRunForAgent(agent.id);
@@ -1938,6 +2021,11 @@ export function heartbeatService(db: Db) {
       triggerDetail,
       payload,
     });
+    // Inject priority sort value into context for queue ordering
+    const priority = parsePriority(opts.priority);
+    enrichedContextSnapshot._prioritySort = PRIORITY_SORT_VALUE[priority];
+    enrichedContextSnapshot._priority = priority;
+
     const issueId = readNonEmptyString(enrichedContextSnapshot.issueId) ?? issueIdFromPayload;
 
     const agent = await getAgent(agentId);

@@ -11,6 +11,26 @@ emitter.setMaxListeners(0);
 
 let nextEventId = 0;
 
+// --- Ring buffer: keep last N events per company for reconnection backfill ---
+const RING_BUFFER_SIZE = 200;
+const ringBuffers = new Map<string, LiveEvent[]>();
+
+function pushToRingBuffer(companyId: string, event: LiveEvent) {
+  let buf = ringBuffers.get(companyId);
+  if (!buf) {
+    buf = [];
+    ringBuffers.set(companyId, buf);
+  }
+  buf.push(event);
+  if (buf.length > RING_BUFFER_SIZE) {
+    buf.splice(0, buf.length - RING_BUFFER_SIZE);
+  }
+}
+
+export function getRecentEvents(companyId: string): LiveEvent[] {
+  return ringBuffers.get(companyId)?.slice() ?? [];
+}
+
 // Lazy DB handle for event persistence – set once at server startup
 let _persistDb: Db | null = null;
 
@@ -63,6 +83,7 @@ export function publishLiveEvent(input: {
 }) {
   const event = toLiveEvent(input);
   emitter.emit(input.companyId, event);
+  pushToRingBuffer(input.companyId, event);
   persistEvent(event);
   return event;
 }

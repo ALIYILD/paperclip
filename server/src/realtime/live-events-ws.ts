@@ -8,7 +8,7 @@ import { agentApiKeys, companyMemberships, instanceUserRoles } from "@paperclipa
 import type { DeploymentMode } from "@paperclipai/shared";
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "../middleware/logger.js";
-import { subscribeCompanyLiveEvents } from "../services/live-events.js";
+import { subscribeCompanyLiveEvents, getRecentEvents } from "../services/live-events.js";
 
 interface WsSocket {
   readyState: number;
@@ -203,6 +203,13 @@ export function setupLiveEventsWebSocketServer(
     if (!context) {
       socket.close(1008, "missing context");
       return;
+    }
+
+    // Backfill: send recent buffered events so reconnected clients catch up
+    const backfill = getRecentEvents(context.companyId);
+    for (const event of backfill) {
+      if (socket.readyState !== WebSocket.OPEN) break;
+      socket.send(JSON.stringify({ ...event, _backfill: true }));
     }
 
     const unsubscribe = subscribeCompanyLiveEvents(context.companyId, (event) => {
