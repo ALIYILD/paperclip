@@ -27,9 +27,7 @@ const boardStatuses = [
   "todo",
   "in_progress",
   "in_review",
-  "blocked",
   "done",
-  "cancelled",
 ];
 
 function statusLabel(status: string): string {
