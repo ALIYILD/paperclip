@@ -20,7 +20,7 @@ class CrmApiError extends Error {
 
 const CRM_BASE = typeof window !== "undefined" && window.location.hostname === "localhost"
   ? ""  // dev: Vite proxy handles /v1 → localhost:3200
-  : "https://deepsynaps-api.fly.dev";  // prod: hit Fly.io directly
+  : ((import.meta as { env?: Record<string, string | undefined> }).env?.VITE_CRM_API_URL ?? "");  // prod: set VITE_CRM_API_URL; empty = same-origin
 
 async function crmRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers ?? undefined);
